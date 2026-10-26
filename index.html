@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MOSIP Face Liveness Prototype</title>
+  <style>
+    :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #17352d; background: #f4f8f5; }
+    body { margin: 0; }
+    main { box-sizing: border-box; width: min(100% - 2rem, 760px); margin: 3rem auto; padding: 2rem; background: white; border: 1px solid #dce8df; border-radius: 1rem; box-shadow: 0 12px 36px #17352d12; }
+    h1 { margin-top: 0; font-size: clamp(1.6rem, 4vw, 2.2rem); }
+    p { color: #49645a; }
+    .status, .result { padding: 0.85rem 1rem; border-radius: 0.6rem; background: #edf5ef; }
+    .status.error, .result.error { color: #8c2525; background: #fff0ef; }
+    .camera { display: block; width: 100%; max-height: 480px; margin: 1rem 0; background: #17231f; border-radius: 0.6rem; }
+    .controls { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+    button { padding: 0.7rem 1rem; border: 0; border-radius: 0.5rem; color: white; background: #176b4b; font: inherit; cursor: pointer; }
+    button:disabled { background: #8ca99a; cursor: not-allowed; }
+    .note { margin-top: 1.5rem; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Face liveness prototype</h1>
+    <p>This local research demo reports heuristic frame diagnostics only. It does not verify identity or prove liveness.</p>
+    <p id="service-status" class="status" role="status">Checking local API…</p>
+    <video id="camera" class="camera" autoplay muted playsinline aria-label="Camera preview"></video>
+    <div class="controls">
+      <button id="start-camera" type="button">Start camera</button>
+      <button id="analyze-frame" type="button" disabled>Analyze frame</button>
+      <button id="stop-camera" type="button" disabled>Stop camera</button>
+    </div>
+    <p id="result" class="result" role="status" aria-live="polite">Start the camera, then analyze a frame.</p>
+    <p class="note">Camera frames are sent to this local server for in-memory processing and are not saved.</p>
+  </main>
+  <script>
+    const camera = document.getElementById("camera");
+    const startButton = document.getElementById("start-camera");
+    const analyzeButton = document.getElementById("analyze-frame");
+    const stopButton = document.getElementById("stop-camera");
+    const serviceStatus = document.getElementById("service-status");
+    const result = document.getElementById("result");
+    let cameraStream;
+
+    function showError(element, message) {
+      element.textContent = message;
+      element.classList.add("error");
+    }
+
+    async function checkService() {
+      try {
+        const response = await fetch("/api/health");
+        if (!response.ok) throw new Error(`API returned HTTP ${response.status}`);
+        const health = await response.json();
+        serviceStatus.textContent = health.ok ? "Local API is ready." : "Local API reported a problem.";
+        if (!health.ok) serviceStatus.classList.add("error");
+      } catch (error) {
+        showError(serviceStatus, `Could not reach the local API: ${error.message}`);
+      }
+    }
+
+    startButton.addEventListener("click", async () => {
+      try {
+        cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        camera.srcObject = cameraStream;
+        startButton.disabled = true;
+        analyzeButton.disabled = false;
+        stopButton.disabled = false;
+        result.textContent = "Camera ready. Select Analyze frame to check the current image.";
+        result.classList.remove("error");
+      } catch (error) {
+        showError(result, `Could not start the camera: ${error.message}. Check browser permissions and camera availability.`);
+      }
+    });
+
+    stopButton.addEventListener("click", () => {
+      if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
+      cameraStream = undefined;
+      camera.srcObject = null;
+      startButton.disabled = false;
+      analyzeButton.disabled = true;
+      stopButton.disabled = true;
+      result.textContent = "Camera stopped.";
+    });
+
+    analyzeButton.addEventListener("click", async () => {
+      if (!camera.videoWidth || !camera.videoHeight) {
+        showError(result, "The camera has not produced a frame yet. Wait a moment and try again.");
+        return;
+      }
+
+      analyzeButton.disabled = true;
+      result.textContent = "Analyzing frame…";
+      result.classList.remove("error");
+      try {
+        const scale = Math.min(1, 1280 / camera.videoWidth, 1280 / camera.videoHeight);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(camera.videoWidth * scale);
+        canvas.height = Math.round(camera.videoHeight * scale);
+        canvas.getContext("2d").drawImage(camera, 0, 0, canvas.width, canvas.height);
+        const response = await fetch("/api/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: canvas.toDataURL("image/jpeg", 0.75) })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `API returned HTTP ${response.status}`);
+        result.textContent = `${data.message} State: ${data.state}. Heuristic score: ${data.score}.`;
+      } catch (error) {
+        showError(result, `Frame analysis failed: ${error.message}`);
+      } finally {
+        analyzeButton.disabled = !cameraStream;
+      }
+    });
+
+    window.addEventListener("beforeunload", () => {
+      if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
+    });
+    checkService();
+  </script>
+</body>
+</html>
